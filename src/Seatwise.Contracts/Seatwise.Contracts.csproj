@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Shared, versioned integration-event contracts. MUST have NO infra refs
+       (enforced by an architecture test in M5). Only immutable records cross
+       the bus. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>

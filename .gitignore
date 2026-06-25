@@ -1,0 +1,31 @@
+# ---- .NET ----
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+artifacts/
+TestResults/
+*.trx
+coverage*.xml
+coverage*.json
+.idea/
+
+# ---- Node / Vite (SPA under src/web) ----
+node_modules/
+dist/
+.vite/
+*.local
+npm-debug.log*
+pnpm-debug.log*
+
+# ---- Env / secrets ----
+.env
+*.env.local
+appsettings.*.local.json
+
+# ---- OS ----
+.DS_Store
+Thumbs.db

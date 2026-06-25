@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Seatwise.Identity": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:61782;http://localhost:61788"
+    }
+  }
+}

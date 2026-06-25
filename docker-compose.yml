@@ -1,0 +1,48 @@
+# Seatwise local stack. `docker compose up` brings up the infrastructure that
+# the services depend on. The .NET services themselves are TODO (built once the
+# Dockerfiles land in a later milestone) — for now run them with `dotnet run`.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: seatwise
+      POSTGRES_PASSWORD: seatwise
+      POSTGRES_DB: seatwise
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seatwise"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # TODO(M0+): add the .NET services as build contexts once Dockerfiles exist:
+  #   identity, gateway, catalog, ordering, payments, notifications.
+  # TODO(M7): observability stack (otel-collector, prometheus, grafana, loki,
+  #   tempo) — see docker-compose.observability.yml (separate, opt-in profile).
+
+volumes:
+  pgdata:
