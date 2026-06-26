@@ -1,61 +1,26 @@
 namespace Seatwise.Contracts.V1;
 
-// Versioned integration-event contracts (ADR-0007). These are the ONLY types
-// that cross the message bus. Domain events stay private inside Ordering.
-//
-// Evolution rule: additive-only within V1. A breaking change becomes a new V2
-// record + a dual-publish window. Every message carries a CorrelationId (saga
-// correlation + OTel trace linkage) and UTC timestamps.
+// The messages that travel between the Booking service and the Payments service
+// over RabbitMQ. These are the only types both services share, so changes here
+// affect both — keep them additive. CorrelationId ties a request to its result.
 
-// Ordering -> bus (consumed by Catalog availability + Notifications)
-public sealed record SeatsReservedV1(
-    Guid OrderId,
-    Guid ShowingId,
-    Guid CustomerId,
-    IReadOnlyList<Guid> SeatIds,
-    DateTimeOffset ReservedAtUtc,
-    Guid CorrelationId);
-
-public sealed record HoldExpiredV1(
-    Guid OrderId,
-    Guid ShowingId,
-    IReadOnlyList<Guid> SeatIds,
-    DateTimeOffset ExpiredAtUtc,
-    Guid CorrelationId);
-
-public sealed record OrderConfirmedV1(
-    Guid OrderId,
-    Guid ShowingId,
-    Guid CustomerId,
-    IReadOnlyList<Guid> SeatIds,
-    IReadOnlyList<string> TicketCodes,
-    DateTimeOffset ConfirmedAtUtc,
-    Guid CorrelationId);
-
-public sealed record OrderCancelledV1(
-    Guid OrderId,
-    Guid ShowingId,
-    IReadOnlyList<Guid> SeatIds,
-    string Reason,
-    Guid CorrelationId);
-
-// Ordering saga -> Payments
+/// <summary>Booking → Payments: "please charge this card for this booking".</summary>
 public sealed record PaymentRequestedV1(
-    Guid OrderId,
+    Guid BookingId,
     decimal Amount,
     string Currency,
-    string IdempotencyKey,
     string CardLast4,
     Guid CorrelationId);
 
-// Payments -> Ordering saga
+/// <summary>Payments → Booking: "the charge went through".</summary>
 public sealed record PaymentSucceededV1(
-    Guid OrderId,
+    Guid BookingId,
     Guid PaymentId,
     DateTimeOffset PaidAtUtc,
     Guid CorrelationId);
 
+/// <summary>Payments → Booking: "the charge was declined".</summary>
 public sealed record PaymentFailedV1(
-    Guid OrderId,
+    Guid BookingId,
     string Reason,
     Guid CorrelationId);

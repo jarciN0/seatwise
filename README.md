@@ -1,131 +1,87 @@
-# Seatwise
+# seatwise
 
-> An event-sourced ticket-booking platform that proves **zero oversell under concurrent load**.
+> A small flight-seat booking backend that **never overbooks a seat, even under load** — built as a reusable base for any seat-inventory booking (airlines, trains, events).
 
-[![CI](https://github.com/jarciN0/seatwise/actions/workflows/ci.yml/badge.svg)](https://github.com/jarciN0/seatwise/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)
-![status](https://img.shields.io/badge/status-🚧%20building%20in%20the%20open-orange)
+🚧 **Building in the open.** The booking flow, the no-overbooking guarantee, the payment saga, and hold expiry all work end-to-end via `docker compose`. Next up: a thin web UI and a load-test script.
 
-## Problem — what & why
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![dotnet](https://img.shields.io/badge/.NET-10-512BD4)
 
-When two customers grab the **same seat in the same millisecond**, exactly one
-must win and the other must get a clean "seat taken" — never a double-booking,
-never money taken for a seat that doesn't exist. That canonical race (with money
-on the line) is the hardest part of any booking system, and it's where
-distributed-systems engineering earns its keep.
+## What it is
 
-Seatwise exists to prove one claim, measurably:
+Two small services that together let a customer book seats on a flight:
 
-> Under a k6 load test firing **N** concurrent reservation requests at a venue
-> with **M < N** seats, **exactly M** seats are sold, **0** are oversold, and
-> p95 hold latency stays under target — verifiable from a committed test report
-> and a Grafana screenshot.
+- **Booking** (`Seatwise.Ordering.Api`) — browse flights, hold seats, pay, get a booking. Stores each booking as a stream of events (Marten event sourcing on Postgres).
+- **Payments** (`Seatwise.Payments.Api`) — a mock card processor.
 
-## Architecture
+They talk to each other only by sending messages over **RabbitMQ** (using Wolverine), so each could be deployed and scaled on its own.
+
+The domain is flights, but nothing is flight-specific in the booking logic — swap the seed data and it's a base for trains, events, or any "limited seats, must not oversell" product.
+
+## The interesting part: no overbooking
+
+When you hold seats, the Booking service inserts one row per seat with the primary key `flightId:seat`. Because a primary key is unique, two people trying to grab seat `1A` at the same instant can't both succeed — the database rejects the second insert and that customer gets a `409`. No locks, no Redis, just the database doing what it's good at.
+
+## How it flows
 
 ```mermaid
-flowchart TB
-    SPA["React + TS Storefront<br/>(Vite, OIDC PKCE)"]
-    GW["API Gateway (YARP)<br/>routing · JWT · rate limit"]
-    IDP["Identity (OpenIddict)<br/>OIDC / OAuth2"]
-    CAT["Catalog API<br/>(EF Core read model + cache)"]
-    ORD["Ordering API + Saga<br/>(Marten ES · Wolverine CQRS)"]
-    PAY["Payments (STUB — real contracts)"]
-    NOT["Notifications (STUB)"]
-    MQ{{"RabbitMQ<br/>MassTransit · Outbox/Inbox"}}
-    ESDB[("Postgres / Marten<br/>event store + projections")]
-    LOCK[("Redis<br/>seat-hold locks + TTL")]
-
-    SPA -->|OIDC login| IDP
-    SPA -->|Bearer JWT| GW
-    GW --> CAT
-    GW --> ORD
-    GW -->|JWKS| IDP
-    ORD --- ESDB
-    ORD --- LOCK
-    ORD <-->|integration events| MQ
-    PAY <--> MQ
-    NOT <--> MQ
-    CAT <--> MQ
+flowchart LR
+    Client -->|hold seats / pay| Booking
+    Booking -->|PaymentRequested| RabbitMQ
+    RabbitMQ -->|PaymentRequested| Payments
+    Payments -->|PaymentSucceeded / Failed| RabbitMQ
+    RabbitMQ -->|result| Booking
+    Booking --> Postgres[("Postgres<br/>event store")]
 ```
 
-## Key decisions / trade-offs
+1. Hold seats → seats reserved for 120 seconds.
+2. Check out → Booking asks Payments to charge the card (over RabbitMQ).
+3. Payments replies → Booking either **confirms** the booking and issues tickets, or **cancels** it and frees the seats.
+4. If nobody pays in time, a background job expires the hold and frees the seats.
 
-- **Event sourcing for Ordering only** — the booking's history *is* the business
-  asset and audit log; Catalog/Identity have no such need. ([ADR-0001](docs/adr))
-- **Three-layer concurrency model** — a short-lived per-seat Redis lock + a TTL'd
-  hold record + optimistic-concurrency event appends. We never hold the lock for
-  the whole 120s. ([ADR-0003](docs/adr))
-- **Outbox/Inbox over 2PC** — atomic DB-commit + publish without distributed
-  transactions; effectively-once delivery. ([ADR-0004](docs/adr))
-- **YAGNI: RabbitMQ, not Kafka** — at booking scale Kafka's machinery is
-  operational overhead we don't need. ([ADR-0005](docs/adr))
-- **Licensing-aware stack** — MediatR / AutoMapper / MassTransit v9 went
-  commercial in 2025–26; we use **Wolverine** (OSS), pin **MassTransit 8**
-  (Apache-2.0), and avoid AutoMapper. ([ADR-0010](docs/adr))
-
-> Full concept and 3-pass design: [`plans/01-microservices.md`](https://github.com/jarciN0/seatwise) (the blueprint this repo is built from).
-
-## Quickstart
+## Run it
 
 ```bash
-# 1. Bring up infrastructure (Postgres, RabbitMQ, Redis)
-docker compose up -d
+docker compose up --build
+```
 
-# 2. Build + test
-dotnet build
+Then open **http://localhost:8081/swagger**. Three sample flights are seeded automatically (the `XX001` "demo" flight has only 3 seats, which makes the no-overbooking behaviour easy to see). RabbitMQ's UI is at http://localhost:15673 (guest/guest).
+
+### Try the whole flow with curl
+
+```bash
+B=http://localhost:8081
+DEMO=33333333-3333-3333-3333-333333333333
+
+# hold two seats
+curl -X POST $B/bookings -H "Content-Type: application/json" \
+  -d "{\"flightId\":\"$DEMO\",\"customerRef\":\"alice\",\"seats\":[\"1A\",\"1B\"]}"
+
+# someone else tries seat 1A -> 409 Conflict (no overbooking)
+curl -i -X POST $B/bookings -H "Content-Type: application/json" \
+  -d "{\"flightId\":\"$DEMO\",\"customerRef\":\"bob\",\"seats\":[\"1A\"]}"
+
+# pay (any card not ending 0000 succeeds; 0000 is declined) then read the booking
+curl -X POST $B/bookings/<bookingId>/checkout -H "Content-Type: application/json" -d '{"cardLast4":"4242"}'
+curl $B/bookings/<bookingId>     # status: Confirmed, with ticket codes
+```
+
+## Tech
+
+| Piece | Choice | Why |
+|---|---|---|
+| Runtime | .NET 10, Minimal APIs | small, fast HTTP |
+| Event store | Marten (Postgres) | bookings stored as events |
+| Messaging | Wolverine + RabbitMQ | services talk asynchronously |
+| Tests | xUnit + FluentAssertions | the booking rules, tested in memory |
+
+We deliberately **don't** use MediatR, AutoMapper, or MassTransit v9 — they became paid products in 2025–26 ([ADR-0010](docs/adr/0010-licensing-aware-dependencies.md)). Wolverine covers both in-process and cross-service messaging.
+
+## Tests
+
+```bash
 dotnet test
-
-# 3. Run the crown-jewel service
-dotnet run --project src/Seatwise.Ordering.Api
-# -> GET http://localhost:5101/health
-# -> POST http://localhost:5101/orders/holds  (header: Idempotency-Key)
 ```
 
-## Screenshot / GIF
-
-🚧 _The headline artifact — a side-by-side of the k6 oversell run and the Grafana
-"sold vs capacity" panel flatlining at capacity — lands with milestone M5._
-
-## Tech stack
-
-| Concern | Choice |
-|---|---|
-| Runtime | .NET 10 |
-| Web | ASP.NET Core Minimal APIs |
-| Gateway | YARP |
-| In-proc CQRS | Wolverine (OSS — not MediatR) |
-| Messaging | MassTransit 8 (Apache-2.0) + RabbitMQ |
-| Event store | Marten on PostgreSQL |
-| Read sides | EF Core (Npgsql) |
-| Locks / holds | Redis (RedLock) |
-| Identity | OpenIddict (OIDC/OAuth2) |
-| Tests | xUnit + FluentAssertions 7 + NSubstitute; Testcontainers; k6 |
-| Frontend | React 19 + TypeScript + Vite |
-
-## Testing
-
-```bash
-dotnet test                          # unit tests (Order aggregate state machine)
-# TODO(M5): k6 run tests/load/oversell.js   — the headline oversell proof
-# TODO(M6): Testcontainers integration tests (Postgres + RabbitMQ + Redis)
-```
-
-Coverage gate target: **≥85%** (concentrated on the Ordering domain + saga).
-
-## Roadmap / status
-
-**🚧 Building in the open.** This is a rough but real scaffold, not the finished slice.
-
-- ✅ Solution structure, CPM, CI skeleton, AI-FIRST layer
-- ✅ Event-sourced **Order** aggregate (Hold → Reserve → Confirm, expiry/cancel) + unit tests
-- ✅ Ordering API with Marten + Wolverine wired; 3 core endpoints
-- 🚧 M4/M5: Redis hold record + RedLock + the k6 oversell proof
-- 🚧 M6: MassTransit saga + outbox/inbox; Payments/Notifications behavior
-- 🚧 M1/M2: Identity client seeding + Gateway JWT validation
-- 🚧 M3: Catalog endpoints + seat-map cache
-- 🚧 M7: OpenTelemetry + Grafana/Loki/Tempo dashboards
-- 🚧 M8: React storefront (seat map + hold countdown)
-
-See [`plans/01-microservices.md`](https://github.com/jarciN0/seatwise) for the full milestone plan (M0–M9).
+---
+Part of [my portfolio](https://github.com/jarciN0). Built AI-first — see [`CLAUDE.md`](CLAUDE.md).

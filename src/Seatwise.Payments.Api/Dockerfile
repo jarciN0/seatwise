@@ -1,0 +1,11 @@
+# Build from the repo root: docker build -f src/Seatwise.Payments.Api/Dockerfile .
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish src/Seatwise.Payments.Api/Seatwise.Payments.Api.csproj -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /app .
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "Seatwise.Payments.Api.dll"]

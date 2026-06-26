@@ -1,4 +1,20 @@
+using Seatwise.Contracts.V1;
+using Wolverine;
+using Wolverine.RabbitMQ;
+
 var builder = WebApplication.CreateBuilder(args);
+
+var rabbit = builder.Configuration["RABBITMQ_URI"] ?? "amqp://guest:guest@localhost:5672";
+
+// Listen for charge requests from the Booking service and send the result back,
+// both over RabbitMQ. The actual handling is in PaymentHandler.
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseRabbitMq(new Uri(rabbit)).AutoProvision();
+    opts.ListenToRabbitQueue("payment-requests");
+    opts.PublishMessage<PaymentSucceededV1>().ToRabbitQueue("payment-results");
+    opts.PublishMessage<PaymentFailedV1>().ToRabbitQueue("payment-results");
+});
 
 builder.Services.AddOpenApi();
 
@@ -9,22 +25,6 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "payments" }))
-   .WithTags("Health");
-
-// STUB (blueprint §1.2 / §2.3): real contract, mock PSP behavior.
-//   POST /payments/charge { orderId, amount, currency, idempotencyKey, cardLast4 }
-//   rule: cardLast4 == "0000" -> decline; else succeed after artificial delay.
-// TODO(M6): consume PaymentRequestedV1 off the bus and publish
-// PaymentSucceededV1 / PaymentFailedV1 (idempotency key + retries + timeouts),
-// driving the Ordering saga.
-app.MapPost("/payments/charge", (ChargeRequest req) =>
-{
-    var declined = req.CardLast4 == "0000";
-    // TODO(M6): publish the integration event instead of returning inline.
-    return Results.Accepted(value: new { req.OrderId, status = declined ? "Declined" : "Accepted" });
-}).WithTags("Payments");
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "payments" }));
 
 app.Run();
-
-internal sealed record ChargeRequest(Guid OrderId, decimal Amount, string Currency, string IdempotencyKey, string CardLast4);

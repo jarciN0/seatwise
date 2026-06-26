@@ -1,7 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Pure domain: the event-sourced Order aggregate + domain events.
-       MUST NOT reference EF, Marten, or any infra (architecture test, M5).
-       Marten discovers Apply()/Create() by convention, so no Marten ref needed. -->
+  <!-- The booking aggregate and its events live here. Marten is referenced
+       because its event-sourcing code generator has to run in the same project
+       that defines the aggregate (it generates the code that replays events into
+       a Booking). The domain code itself doesn't use any Marten types. -->
+
+  <ItemGroup>
+    <PackageReference Include="Marten" />
+  </ItemGroup>
 
 </Project>

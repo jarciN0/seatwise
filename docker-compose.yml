@@ -1,6 +1,5 @@
-# Seatwise local stack. `docker compose up` brings up the infrastructure that
-# the services depend on. The .NET services themselves are TODO (built once the
-# Dockerfiles land in a later milestone) — for now run them with `dotnet run`.
+# Runs the whole thing: `docker compose up --build`
+# Then open http://localhost:8081/swagger (booking API) and book a seat.
 services:
   postgres:
     image: postgres:17
@@ -9,40 +8,54 @@ services:
       POSTGRES_PASSWORD: seatwise
       POSTGRES_DB: seatwise
     ports:
-      - "5432:5432"
+      - "5442:5432"   # host 5442 to avoid clashing with other local Postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U seatwise"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   rabbitmq:
     image: rabbitmq:4-management
     ports:
-      - "5672:5672"
-      - "15672:15672"   # management UI
+      - "5673:5672"     # host 5673 to avoid clashing with other local RabbitMQ
+      - "15673:15672"   # management UI at http://localhost:15673 (guest/guest)
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
-  redis:
-    image: redis:7.4
+  # The booking service: flights, seat holds, the no-overbooking guard, bookings.
+  ordering:
+    build:
+      context: .
+      dockerfile: src/Seatwise.Ordering.Api/Dockerfile
+    environment:
+      ConnectionStrings__postgres: "Host=postgres;Port=5432;Database=seatwise;Username=seatwise;Password=seatwise"
+      RABBITMQ_URI: "amqp://guest:guest@rabbitmq:5672"
     ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
-  # TODO(M0+): add the .NET services as build contexts once Dockerfiles exist:
-  #   identity, gateway, catalog, ordering, payments, notifications.
-  # TODO(M7): observability stack (otel-collector, prometheus, grafana, loki,
-  #   tempo) — see docker-compose.observability.yml (separate, opt-in profile).
+  # The (mock) payment service. Talks to ordering only over RabbitMQ.
+  payments:
+    build:
+      context: .
+      dockerfile: src/Seatwise.Payments.Api/Dockerfile
+    environment:
+      RABBITMQ_URI: "amqp://guest:guest@rabbitmq:5672"
+    ports:
+      - "18082:8080"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   pgdata:

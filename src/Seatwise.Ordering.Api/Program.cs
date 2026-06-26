@@ -1,46 +1,51 @@
 using JasperFx;
 using Marten;
-using Seatwise.Ordering.Api.Concurrency;
+using Seatwise.Contracts.V1;
 using Seatwise.Ordering.Api.Endpoints;
+using Seatwise.Ordering.Api.Hosting;
+using Seatwise.Ordering.Api.Persistence;
 using Seatwise.Ordering.Domain;
+using Weasel.Core;
 using Wolverine;
 using Wolverine.Marten;
+using Wolverine.RabbitMQ;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetConnectionString("ordering")
-    ?? "Host=localhost;Port=5432;Database=seatwise_ordering;Username=seatwise;Password=seatwise";
+var postgres = builder.Configuration.GetConnectionString("postgres")
+    ?? "Host=localhost;Port=5432;Database=seatwise;Username=seatwise;Password=seatwise";
+var rabbit = builder.Configuration["RABBITMQ_URI"] ?? "amqp://guest:guest@localhost:5672";
 
-// ---- Marten: event store + projections (blueprint §2.2 / §2.5) ----
+// Marten = the Postgres event store (bookings) + document store (flights, seat holds).
 builder.Services.AddMarten(opts =>
 {
-    opts.Connection(connectionString);
+    opts.Connection(postgres);
 
-    // The Order aggregate is rehydrated via live aggregation (Create/Apply).
-    // TODO(M4): register OrderSummaryProjection (inline) and
-    // ShowingAvailabilityProjection (async) here.
-    opts.Projections.LiveStreamAggregation<Order>();
+    // Create/upgrade the database tables automatically. Fine for a demo; a real
+    // deployment would run migrations explicitly instead.
+    opts.AutoCreateSchemaObjects = AutoCreate.CreateOrUpdate;
+
+    // Rebuild a Booking on demand by replaying its events.
+    opts.Projections.LiveStreamAggregation<Booking>();
+
+    // SeatHold's string Id ("flightId:seat") is the primary key — that uniqueness
+    // is what stops two bookings from taking the same seat.
+    opts.Schema.For<SeatHold>();
+    opts.Schema.For<Flight>();
 })
-// Auto-create schema in dev only.
-.IntegrateWithWolverine();
+.IntegrateWithWolverine(); // lets message handlers use a Marten session
 
-// ---- Wolverine: in-proc CQRS + (future) outbox (ADR-0010: NOT MediatR) ----
+// Wolverine = message handling. Here it talks to the Payments service over RabbitMQ.
 builder.Host.UseWolverine(opts =>
 {
-    // TODO(M6): add the MassTransit transport + transactional outbox so
-    // PaymentRequestedV1 publishes atomically with the event append.
-    opts.Policies.AutoApplyTransactions();
+    opts.UseRabbitMq(new Uri(rabbit)).AutoProvision();
+    opts.PublishMessage<PaymentRequestedV1>().ToRabbitQueue("payment-requests");
+    opts.ListenToRabbitQueue("payment-results");
 });
 
-// Concurrency primitives — in-memory stubs for the rough slice (blueprint §2.6).
-// TODO(M5): swap for RedLock + Redis-backed implementations.
-builder.Services.AddSingleton<ISeatLock, InMemorySeatLock>();
-builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
-
+builder.Services.AddHostedService<FlightSeeder>();        // sample flights on startup
+builder.Services.AddHostedService<HoldExpirySweeper>();   // frees seats when holds expire
 builder.Services.AddOpenApi();
-
-// TODO(M2): AddAuthentication().AddJwtBearer(...) validating against the IdP's
-// JWKS (issuer + audience seatwise-api); deny-by-default scope policies.
 
 var app = builder.Build();
 
@@ -49,9 +54,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "ordering" }))
-   .WithTags("Health");
-
-app.MapOrderEndpoints();
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "ordering" }));
+app.MapBookingApi();
 
 await app.RunJasperFxCommands(args);

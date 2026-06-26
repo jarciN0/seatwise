@@ -1,68 +1,45 @@
-# CLAUDE.md — project context for AI agents
+# CLAUDE.md — seatwise
 
-Seatwise is an **event-sourced ticket-booking platform** whose entire reason to
-exist is to prove **zero seat oversell under concurrent load**. Read this before
-touching code; it makes you (agent or human) productive in minutes.
+Context for AI agents (and humans). seatwise is a flight-seat booking backend.
+Its one rule that must never break: **a seat can never be booked twice.**
 
-## Domain glossary (canonical — use these exact terms everywhere)
+## The two services
+- **Booking** (`src/Seatwise.Ordering.Api`) — flights, seat holds, bookings. Uses
+  Marten (Postgres) to store each booking as a stream of events.
+- **Payments** (`src/Seatwise.Payments.Api`) — a mock card processor.
 
-- **Venue** — a physical place with a fixed seat map.
-- **Showing** — a performance at a Venue at a time. We say *Showing*, **never
-  "Event"**, to avoid colliding with event-sourcing "event" (ADR-0009).
-- **Seat** — an addressable position in a Showing (`section/row/number`).
-- **Hold** — a short-lived (default **120 s**) exclusive claim on seats, pending checkout.
-- **Reservation** — a hold committed to an Order (survives until payment outcome).
-- **Order** — the event-sourced aggregate tracking a purchase across its lifecycle.
+They communicate only by sending the records in `Seatwise.Contracts.V1` over
+RabbitMQ (via Wolverine). Don't make one service call the other directly.
 
-**Order lifecycle:** `Drafting → Reserved → AwaitingPayment → Confirmed`, with
-`Expired` (TTL) and `PaymentDeclined → Cancelled` (compensation) branches.
+## Words we use
+- **Flight** — a scheduled flight with a fixed list of seat numbers ("1A", "1B"…).
+- **SeatHold** — one row per claimed seat, keyed `flightId:seat`. Its unique key is
+  what prevents overbooking.
+- **Booking** — a customer's purchase: Held → AwaitingPayment → Confirmed, or
+  Cancelled / Expired.
 
-## Architecture
+## How overbooking is prevented (don't weaken this)
+Holding seats inserts SeatHold rows. Because the row id is `flightId:seat` and ids
+are unique, two simultaneous holds for the same seat can't both succeed — Postgres
+rejects the second and that request gets a 409. Keep using `Insert` (not `Store`)
+for new holds so the database stays the source of truth.
 
-Bounded contexts: **Identity** (OpenIddict), **Gateway** (YARP), **Catalog**
-(EF Core read model), **Ordering** (Marten event store — the crown jewel),
-**Payments** (stub), **Notifications** (stub). See README Mermaid diagram.
-
-> **Rule:** bounded contexts never reference each other's internals. Only
-> `Seatwise.Contracts.V1` records cross the message bus.
-
-## The invariant — stated as law
-
-> **Never weaken the oversell guarantee.** Any change touching holds, locks,
-> reservations, or the event stream MUST keep the (forthcoming) k6 oversell test
-> green: N concurrent requests, M < N seats ⇒ exactly M sold, 0 oversold.
-
-Three layers enforce it (blueprint §2.6): (1) per-seat Redis RedLock guarding
-only the short critical section; (2) a TTL'd Redis hold record carrying the 120 s
-exclusivity; (3) optimistic-concurrency (expected-version) appends on the stream.
-
-## Build / test commands
-
+## Build / run / test
 ```bash
-docker compose up -d                              # Postgres + RabbitMQ + Redis
-dotnet build                                      # whole solution
-dotnet test                                       # unit tests (Order aggregate)
-dotnet run --project src/Seatwise.Ordering.Api    # the core service
-# TODO: k6 run tests/load/oversell.js             # the headline proof (M5)
-# TODO: Testcontainers integration tests (M6)
+docker compose up --build      # whole stack; API at http://localhost:8081/swagger
+dotnet build                   # compile
+dotnet test                    # booking-rule unit tests (no database needed)
 ```
 
-## Conventions (delta from STANDARDS.md)
+## Conventions
+- `record` types for events and messages; keep them immutable.
+- Pass `CancellationToken` through async methods.
+- Hand-write small mappings; no AutoMapper.
+- Booking rules live in the `Booking` class as plain methods that return events —
+  no database calls in there, so they stay easy to test.
 
-- `record` types for domain events and integration contracts; immutable.
-- `CancellationToken` plumbed through every async method.
-- `ProblemDetails` (RFC 9457) is the uniform error shape; `409` on seat conflict
-  carries `conflictingSeatIds`.
-- Hand-written mapping / record projections — **no AutoMapper**.
-
-## Never do X
-
-- **Never use MediatR, AutoMapper, or MassTransit v9** — all commercial as of
-  2025–26 (ADR-0010). Use **Wolverine**, hand-mapping, **MassTransit 8**.
-- **Never hold the seat lock for the whole 120 s hold window** — lock the
-  critical section only; the TTL'd hold record carries exclusivity.
-- **Never publish a domain event on the bus** — only `Seatwise.Contracts.V1`
-  integration events cross service boundaries.
-- **Never trust a client-supplied price** — the server is source of truth.
-- **Never bypass the `Idempotency-Key`** on a mutating endpoint.
-- **Never merge AI-generated code without a green pipeline + a human read.**
+## Don't
+- Don't add MediatR, AutoMapper, or MassTransit v9 — they're paid now. Use Wolverine.
+- Don't let one service read another's database or call its HTTP API — go through
+  RabbitMQ messages instead.
+- Name Wolverine message-handler classes ending in `Handler` or Wolverine won't find them.
